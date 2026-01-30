@@ -48,6 +48,12 @@ SOKOL_APP_UTILS_API_DECL int sapp_screen_width(void);
 SOKOL_APP_UTILS_API_DECL int sapp_screen_height(void);
 /* returns true if the window has focus */
 SOKOL_APP_UTILS_API_DECL bool sapp_window_focused(void);
+/* returns the number of connected monitors (only on desktop platforms) */
+SOKOL_APP_UTILS_API_DECL int sapp_num_monitors(void);
+/* get the current monitor index (only on desktop platforms) */
+SOKOL_APP_UTILS_API_DECL int sapp_current_monitor(void);
+/* set the current monitor (only on desktop platforms) */
+SOKOL_APP_UTILS_API_DECL void sapp_set_monitor(int index);
 /* sets fullscreen mode (wrapper around platform specific logic) */
 SOKOL_APP_UTILS_API_DECL void sapp_set_fullscreen(bool enable);
 
@@ -152,6 +158,39 @@ _SOKOL_PRIVATE int _sapp_macos_screen_height(void) {
   }
   return 0;
 }
+
+_SOKOL_PRIVATE int _sapp_macos_num_monitors(void) {
+  NSArray *screens = [NSScreen screens];
+  return (int)[screens count];
+}
+
+_SOKOL_PRIVATE int _sapp_macos_current_monitor(void) {
+  if (_sapp.macos.window) {
+    NSScreen *screen = [_sapp.macos.window screen];
+    NSArray *screens = [NSScreen screens];
+    NSUInteger index = [screens indexOfObject:screen];
+    if (index != NSNotFound) {
+      return (int)index;
+    }
+  }
+  return 0;
+}
+
+_SOKOL_PRIVATE void _sapp_macos_set_monitor(int index) {
+  if (_sapp.macos.window) {
+    NSArray *screens = [NSScreen screens];
+    if ((index >= 0) && (index < (int)[screens count])) {
+      NSScreen *screen = [screens objectAtIndex:index];
+      NSRect screen_frame = [screen frame];
+      NSRect window_frame = [_sapp.macos.window frame];
+      CGFloat x = screen_frame.origin.x +
+                  (screen_frame.size.width - window_frame.size.width) / 2.0f;
+      CGFloat y = screen_frame.origin.y +
+                  (screen_frame.size.height - window_frame.size.height) / 2.0f;
+      [_sapp.macos.window setFrameOrigin:NSMakePoint(x, y)];
+    }
+  }
+}
 #endif /* _SAPP_MACOS */
 
 #if defined(_SAPP_WIN32)
@@ -242,6 +281,77 @@ _SOKOL_PRIVATE int _sapp_win32_screen_height(void) {
   }
   return GetSystemMetrics(SM_CYSCREEN);
 }
+
+typedef struct {
+  HMONITOR h_mon;
+  int index;
+  int target_index;
+  RECT rect;
+  bool found;
+} _sapp_win32_mon_enum_t;
+
+_SOKOL_PRIVATE BOOL CALLBACK _sapp_win32_mon_enum_proc(HMONITOR hMonitor,
+                                                       HDC hdc, LPRECT lprc,
+                                                       LPARAM dwData) {
+  _sapp_win32_mon_enum_t *data = (_sapp_win32_mon_enum_t *)dwData;
+  (void)hdc;
+  /* Mode 1: Find index of h_mon */
+  if (data->h_mon) {
+    if (data->h_mon == hMonitor) {
+      data->found = true;
+      return FALSE;
+    }
+    data->index++;
+  }
+  /* Mode 2: Find rect of target_index */
+  else {
+    if (data->index == data->target_index) {
+      data->rect = *lprc;
+      data->found = true;
+      return FALSE;
+    }
+    data->index++;
+  }
+  return TRUE;
+}
+
+_SOKOL_PRIVATE int _sapp_win32_num_monitors(void) {
+  return GetSystemMetrics(SM_CMONITORS);
+}
+
+_SOKOL_PRIVATE int _sapp_win32_current_monitor(void) {
+  if (_sapp.win32.hwnd) {
+    HMONITOR hMon =
+        MonitorFromWindow(_sapp.win32.hwnd, MONITOR_DEFAULTTONEAREST);
+    _sapp_win32_mon_enum_t data;
+    ZeroMemory(&data, sizeof(data));
+    data.h_mon = hMon;
+    EnumDisplayMonitors(NULL, NULL, _sapp_win32_mon_enum_proc, (LPARAM)&data);
+    if (data.found)
+      return data.index;
+  }
+  return 0;
+}
+
+_SOKOL_PRIVATE void _sapp_win32_set_monitor(int index) {
+  if (_sapp.win32.hwnd) {
+    _sapp_win32_mon_enum_t data;
+    ZeroMemory(&data, sizeof(data));
+    data.target_index = index;
+    EnumDisplayMonitors(NULL, NULL, _sapp_win32_mon_enum_proc, (LPARAM)&data);
+    if (data.found) {
+      RECT r = data.rect;
+      RECT win_rect;
+      GetWindowRect(_sapp.win32.hwnd, &win_rect);
+      int w = win_rect.right - win_rect.left;
+      int h = win_rect.bottom - win_rect.top;
+      int x = r.left + (r.right - r.left - w) / 2;
+      int y = r.top + (r.bottom - r.top - h) / 2;
+      SetWindowPos(_sapp.win32.hwnd, NULL, x, y, 0, 0,
+                   SWP_NOSIZE | SWP_NOZORDER);
+    }
+  }
+}
 #endif /* _SAPP_WIN32 */
 
 #if defined(_SAPP_LINUX)
@@ -300,6 +410,61 @@ _SOKOL_PRIVATE int _sapp_x11_screen_width(void) {
 
 _SOKOL_PRIVATE int _sapp_x11_screen_height(void) {
   return DisplayHeight(_sapp.x11.display, DefaultScreen(_sapp.x11.display));
+}
+
+_SOKOL_PRIVATE int _sapp_x11_num_monitors(void) {
+  int num_monitors = 0;
+  XRRMonitorInfo *monitors = XRRGetMonitors(
+      _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_monitors);
+  if (monitors) {
+    XRRFreeMonitors(monitors);
+  }
+  return num_monitors > 0 ? num_monitors : 1;
+}
+
+_SOKOL_PRIVATE int _sapp_x11_current_monitor(void) {
+  int num_monitors = 0;
+  XRRMonitorInfo *monitors = XRRGetMonitors(
+      _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_monitors);
+  if (monitors) {
+    int x, y;
+    Window child;
+    XTranslateCoordinates(_sapp.x11.display, _sapp.x11.window,
+                          DefaultRootWindow(_sapp.x11.display), 0, 0, &x, &y,
+                          &child);
+    XWindowAttributes attribs;
+    XGetWindowAttributes(_sapp.x11.display, _sapp.x11.window, &attribs);
+    int cx = x + attribs.width / 2;
+    int cy = y + attribs.height / 2;
+
+    int result = 0;
+    for (int i = 0; i < num_monitors; i++) {
+      if (cx >= monitors[i].x && cx < (monitors[i].x + monitors[i].width) &&
+          cy >= monitors[i].y && cy < (monitors[i].y + monitors[i].height)) {
+        result = i;
+        break;
+      }
+    }
+    XRRFreeMonitors(monitors);
+    return result;
+  }
+  return 0;
+}
+
+_SOKOL_PRIVATE void _sapp_x11_set_monitor(int index) {
+  int num_monitors = 0;
+  XRRMonitorInfo *monitors = XRRGetMonitors(
+      _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_monitors);
+  if (monitors) {
+    if (index >= 0 && index < num_monitors) {
+      XWindowAttributes attribs;
+      XGetWindowAttributes(_sapp.x11.display, _sapp.x11.window, &attribs);
+      int x = monitors[index].x + (monitors[index].width - attribs.width) / 2;
+      int y = monitors[index].y + (monitors[index].height - attribs.height) / 2;
+      XMoveWindow(_sapp.x11.display, _sapp.x11.window, x, y);
+    }
+    XRRFreeMonitors(monitors);
+  }
 }
 #endif /* _SAPP_LINUX */
 
@@ -376,6 +541,40 @@ SOKOL_API_IMPL int sapp_screen_height(void) {
   return _sapp_x11_screen_height();
 #else
   return 0;
+#endif
+}
+
+SOKOL_API_IMPL int sapp_num_monitors(void) {
+#if defined(_SAPP_MACOS)
+  return _sapp_macos_num_monitors();
+#elif defined(_SAPP_WIN32)
+  return _sapp_win32_num_monitors();
+#elif defined(_SAPP_LINUX)
+  return _sapp_x11_num_monitors();
+#else
+  return 1;
+#endif
+}
+
+SOKOL_API_IMPL int sapp_current_monitor(void) {
+#if defined(_SAPP_MACOS)
+  return _sapp_macos_current_monitor();
+#elif defined(_SAPP_WIN32)
+  return _sapp_win32_current_monitor();
+#elif defined(_SAPP_LINUX)
+  return _sapp_x11_current_monitor();
+#else
+  return 0;
+#endif
+}
+
+SOKOL_API_IMPL void sapp_set_monitor(int index) {
+#if defined(_SAPP_MACOS)
+  _sapp_macos_set_monitor(index);
+#elif defined(_SAPP_WIN32)
+  _sapp_win32_set_monitor(index);
+#elif defined(_SAPP_LINUX)
+  _sapp_x11_set_monitor(index);
 #endif
 }
 
