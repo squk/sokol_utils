@@ -51,6 +51,12 @@ int sapp_current_display(void);
 void sapp_set_display(int index);
 const char* sapp_display_name(int index);
 void sapp_set_fullscreen(bool enable);
+void sapp_display_position(int index, int *x, int *y);
+void sapp_set_window_resizable(bool resizable);
+void sapp_set_window_decorated(bool decorated);
+bool sapp_can_move_window(void);
+void sapp_set_window_visible(bool visible);
+bool sapp_window_visible(void);
 void sapp_set_swap_interval(int interval);
 int sapp_get_swap_interval(void);
 ```

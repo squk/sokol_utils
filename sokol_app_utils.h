@@ -62,8 +62,24 @@ SOKOL_APP_UTILS_API_DECL int sapp_current_display(void);
 SOKOL_APP_UTILS_API_DECL void sapp_set_display(int index);
 /* get the display name by index (only on desktop platforms) */
 SOKOL_APP_UTILS_API_DECL const char* sapp_display_name(int index);
+/* top-left corner of a display in desktop coordinates (like the window position) */
+SOKOL_APP_UTILS_API_DECL void sapp_display_position(int index, int *x, int *y);
 /* sets fullscreen mode (wrapper around platform specific logic) */
 SOKOL_APP_UTILS_API_DECL void sapp_set_fullscreen(bool enable);
+/* window style, after sokol_app made the window (desktop; no-ops elsewhere):
+   whether the user can resize it (not: it keeps its current size, and
+   sapp_set_window_size moves the limit along), and whether it has a title bar and
+   border. sokol's own fullscreen toggle resets the style on Win32: set them again
+   after leaving fullscreen. */
+SOKOL_APP_UTILS_API_DECL void sapp_set_window_resizable(bool resizable);
+SOKOL_APP_UTILS_API_DECL void sapp_set_window_decorated(bool decorated);
+/* whether moving the window (sapp_set_window_position, sapp_set_display) can
+   work: false on the web, and under XWayland, where the Wayland compositor places
+   windows and ignores a program's moves */
+SOKOL_APP_UTILS_API_DECL bool sapp_can_move_window(void);
+/* show or hide the window (web: the canvas) */
+SOKOL_APP_UTILS_API_DECL void sapp_set_window_visible(bool visible);
+SOKOL_APP_UTILS_API_DECL bool sapp_window_visible(void);
 /* set the swap interval:
     0: VSync off (unthrottled rendering)
     1: VSync on (standard refresh rate, e.g. 60 FPS)
@@ -240,6 +256,19 @@ _SOKOL_PRIVATE void _sapp_macos_set_display(int index) {
   }
 }
 
+/* display position, y flipped to top-down like the window position */
+_SOKOL_PRIVATE void _sapp_macos_display_position(int index, int *x, int *y) {
+  NSArray *screens = [NSScreen screens];
+  *x = 0;
+  *y = 0;
+  if (screens && index >= 0 && (NSUInteger)index < [screens count]) {
+    NSRect primary_frame = [[screens objectAtIndex:0] frame];
+    NSRect frame = [[screens objectAtIndex:(NSUInteger)index] frame];
+    *x = (int)frame.origin.x;
+    *y = (int)(primary_frame.size.height - frame.origin.y - frame.size.height);
+  }
+}
+
 _SOKOL_PRIVATE const char* _sapp_macos_display_name(int index) {
   NSArray *screens = [NSScreen screens];
   if (index >= 0 && index < (int)[screens count]) {
@@ -311,6 +340,34 @@ _SOKOL_PRIVATE void _sapp_macos_set_swap_interval(int interval) {
     }
     #endif
 }
+/* window style and visibility */
+static bool _sapp_utils_resizable = true;
+static bool _sapp_utils_decorated = true;
+
+_SOKOL_PRIVATE void _sapp_macos_apply_style(void) {
+  NSUInteger style = _sapp_utils_decorated
+      ? (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable)
+      : NSWindowStyleMaskBorderless;
+  if (_sapp_utils_resizable) {
+    style |= NSWindowStyleMaskResizable;
+  }
+  const NSRect content = [_sapp.macos.window contentRectForFrameRect:_sapp.macos.window.frame];
+  _sapp.macos.window.styleMask = style;
+  [_sapp.macos.window setFrame:[_sapp.macos.window frameRectForContentRect:content] display:YES];
+}
+
+_SOKOL_PRIVATE void _sapp_macos_set_window_visible(bool visible) {
+  if (visible) {
+    [_sapp.macos.window makeKeyAndOrderFront:nil];
+  } else {
+    [_sapp.macos.window orderOut:nil];
+  }
+}
+
+_SOKOL_PRIVATE bool _sapp_macos_window_visible(void) {
+  return _sapp.macos.window.isVisible;
+}
+
 #endif /* _SAPP_MACOS */
 
 #if defined(_SAPP_IOS)
@@ -487,6 +544,16 @@ _SOKOL_PRIVATE int _sapp_win32_display_height(int index) {
   return 0;
 }
 
+/* display position */
+_SOKOL_PRIVATE void _sapp_win32_display_position(int index, int *x, int *y) {
+  _sapp_win32_display_enum_t data;
+  ZeroMemory(&data, sizeof(data));
+  data.target_index = index;
+  EnumDisplayMonitors(NULL, NULL, _sapp_win32_display_enum_proc, (LPARAM)&data);
+  *x = data.found ? (int)data.rect.left : 0;
+  *y = data.found ? (int)data.rect.top : 0;
+}
+
 _SOKOL_PRIVATE int _sapp_win32_current_display(void) {
   if (_sapp.win32.hwnd) {
     HMONITOR hDisplay =
@@ -561,15 +628,99 @@ _SOKOL_PRIVATE void _sapp_win32_set_swap_interval(int interval) {
     _sapp_vk_recreate_swapchain();
     #endif
 }
+/* window style and visibility: the style sokol_app creates, less the
+   resize frame and maximize box when not resizable, or a popup when undecorated;
+   the client area keeps its size */
+static bool _sapp_utils_resizable = true;
+static bool _sapp_utils_decorated = true;
+
+_SOKOL_PRIVATE void _sapp_win32_apply_style(void) {
+  RECT client;
+  const LONG_PTR visible = GetWindowLongPtr(_sapp.win32.hwnd, GWL_STYLE) & WS_VISIBLE;
+  DWORD style = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
+  if (_sapp_utils_decorated) {
+    style |= WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    if (_sapp_utils_resizable) {
+      style |= WS_MAXIMIZEBOX | WS_SIZEBOX;
+    }
+  } else {
+    style |= WS_POPUP;
+  }
+  GetClientRect(_sapp.win32.hwnd, &client);
+  SetWindowLongPtr(_sapp.win32.hwnd, GWL_STYLE, (LONG_PTR)style | visible);
+  RECT outer = client;
+  AdjustWindowRectEx(&outer, style, FALSE, WS_EX_APPWINDOW | WS_EX_WINDOWEDGE);
+  SetWindowPos(_sapp.win32.hwnd, NULL, 0, 0, outer.right - outer.left, outer.bottom - outer.top,
+               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+}
+
+_SOKOL_PRIVATE void _sapp_win32_set_window_visible(bool visible) {
+  ShowWindow(_sapp.win32.hwnd, visible ? SW_SHOW : SW_HIDE);
+}
+
+_SOKOL_PRIVATE bool _sapp_win32_window_visible(void) {
+  return IsWindowVisible(_sapp.win32.hwnd) != 0;
+}
+
 #endif /* _SAPP_WIN32 */
 
 #if defined(_SAPP_LINUX)
+
+/* window style and visibility: a fixed size is minimum = maximum size in
+   the size hints (window managers then offer no resizing); no decorations is the
+   Motif hints property most X11 window managers honor */
+static bool _sapp_utils_resizable = true;
+
+_SOKOL_PRIVATE void _sapp_x11_size_hints(int w, int h) {
+  XSizeHints* hints = XAllocSizeHints();
+  /* static gravity (sokol_app sets center): a position set is the content area's,
+     the same as sapp_get_window_position reads, whatever the frame */
+  hints->flags = PWinGravity;
+  hints->win_gravity = StaticGravity;
+  if (!_sapp_utils_resizable) {
+    hints->flags |= PMinSize | PMaxSize;
+    hints->min_width = hints->max_width = w;
+    hints->min_height = hints->max_height = h;
+  }
+  XSetWMNormalHints(_sapp.x11.display, _sapp.x11.window, hints);
+  XFree(hints);
+  XFlush(_sapp.x11.display);
+}
+
+_SOKOL_PRIVATE void _sapp_x11_set_window_decorated(bool decorated) {
+  struct {
+    unsigned long flags, functions, decorations;
+    long input_mode;
+    unsigned long status;
+  } motif = {2 /* MWM_HINTS_DECORATIONS */, 0, decorated ? 1UL : 0UL, 0, 0};
+  const Atom atom = XInternAtom(_sapp.x11.display, "_MOTIF_WM_HINTS", False);
+  XChangeProperty(_sapp.x11.display, _sapp.x11.window, atom, atom, 32, PropModeReplace,
+                  (unsigned char*)&motif, 5);
+  XFlush(_sapp.x11.display);
+}
+
+_SOKOL_PRIVATE bool _sapp_x11_can_move_window(void) {
+  static int answer = -1; /* the X server doesn't change */
+  if (answer < 0) {
+    int opcode, event, error;
+    answer = XQueryExtension(_sapp.x11.display, "XWAYLAND", &opcode, &event, &error) ? 0 : 1;
+  }
+  return answer == 1;
+}
+
+_SOKOL_PRIVATE void _sapp_x11_apply_size_hints(void) {
+  XWindowAttributes attribs;
+  XGetWindowAttributes(_sapp.x11.display, _sapp.x11.window, &attribs);
+  _sapp_x11_size_hints(attribs.width, attribs.height);
+}
+
 #include <X11/extensions/Xrandr.h>
 _SOKOL_PRIVATE void _sapp_x11_set_window_position(int x, int y) {
   XMoveWindow(_sapp.x11.display, _sapp.x11.window, x, y);
 }
 
 _SOKOL_PRIVATE void _sapp_x11_set_window_size(int w, int h) {
+  _sapp_x11_size_hints(w, h); /* a fixed size moves with it */
   XResizeWindow(_sapp.x11.display, _sapp.x11.window, (unsigned int)w,
                 (unsigned int)h);
 }
@@ -612,17 +763,13 @@ _SOKOL_PRIVATE void _sapp_x11_set_mouse_position(float x, float y) {
   }
 }
 
-_SOKOL_PRIVATE bool _sapp_x11_window_focused(void) {
-  if (_sapp.x11.display) {
-    Window focused;
-    int revert_to;
-    XGetInputFocus(_sapp.x11.display, &focused, &revert_to);
-    return focused == _sapp.x11.window;
-  }
-  return false;
-}
+/* _sapp_x11_window_focused() removed: sokol_app.h defines it now (it tracks
+   focus from FocusIn/FocusOut events). */
 
 _SOKOL_PRIVATE int _sapp_x11_display_width(int index) {
+  if (!_sapp.x11.display) {
+    return 0;
+  }
   int num_displays = 0;
   int width = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
@@ -639,6 +786,9 @@ _SOKOL_PRIVATE int _sapp_x11_display_width(int index) {
 }
 
 _SOKOL_PRIVATE int _sapp_x11_display_height(int index) {
+  if (!_sapp.x11.display) {
+    return 0;
+  }
   int num_displays = 0;
   int height = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
@@ -654,7 +804,31 @@ _SOKOL_PRIVATE int _sapp_x11_display_height(int index) {
   return height;
 }
 
+/* display position */
+_SOKOL_PRIVATE void _sapp_x11_display_position(int index, int *x, int *y) {
+  if (!_sapp.x11.display) {
+    *x = 0;
+    *y = 0;
+    return;
+  }
+  int num_displays = 0;
+  XRRMonitorInfo *displays = XRRGetMonitors(
+      _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
+  *x = 0;
+  *y = 0;
+  if (displays) {
+    if (index >= 0 && index < num_displays) {
+      *x = displays[index].x;
+      *y = displays[index].y;
+    }
+    XRRFreeMonitors(displays);
+  }
+}
+
 _SOKOL_PRIVATE int _sapp_x11_num_displays(void) {
+  if (!_sapp.x11.display) {
+    return 1;
+  }
   int num_displays = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -665,6 +839,9 @@ _SOKOL_PRIVATE int _sapp_x11_num_displays(void) {
 }
 
 _SOKOL_PRIVATE int _sapp_x11_current_display(void) {
+  if (!_sapp.x11.display) {
+    return 0;
+  }
   int num_displays = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -694,6 +871,9 @@ _SOKOL_PRIVATE int _sapp_x11_current_display(void) {
 }
 
 _SOKOL_PRIVATE void _sapp_x11_set_display(int index) {
+  if (!_sapp.x11.display) {
+    return;
+  }
   int num_displays = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -718,6 +898,9 @@ _SOKOL_PRIVATE void _sapp_x11_set_display(int index) {
 }
 
 _SOKOL_PRIVATE const char* _sapp_x11_display_name(int index) {
+  if (!_sapp.x11.display) {
+    return "";
+  }
   int num_displays = 0;
   XRRMonitorInfo* displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -741,11 +924,9 @@ _SOKOL_PRIVATE const char* _sapp_x11_display_name(int index) {
 _SOKOL_PRIVATE void _sapp_linux_set_swap_interval(int interval) {
     _sapp.desc.swap_interval = interval;
     #if defined(_SAPP_GLX)
-    typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display* dpy, GLXDrawable drawable, int interval);
-    PFNGLXSWAPINTERVALEXTPROC glXSwapIntervalEXT = (PFNGLXSWAPINTERVALEXTPROC) glXGetProcAddress((const GLubyte*)"glXSwapIntervalEXT");
-    if (glXSwapIntervalEXT) {
-        glXSwapIntervalEXT(_sapp.x11.display, _sapp.x11.window, interval);
-    }
+    /* use sokol_app's GLX loader: glXGetProcAddress isn't declared (sokol
+       loads libGL dynamically), and the drawable is the GLX window, not the X11 one */
+    _sapp_glx_swapinterval(interval);
     #elif defined(_SAPP_EGL)
     eglSwapInterval(_sapp.egl.display, interval);
     #endif
@@ -758,6 +939,88 @@ _SOKOL_PRIVATE void _sapp_linux_set_swap_interval(int interval) {
 #if defined(_SAPP_EMSCRIPTEN)
 #include <emscripten.h>
 #endif
+
+#if defined(_SAPP_EMSCRIPTEN)
+/* the canvas is the window: hidden keeps its place in the page */
+EM_JS(void, _sapp_emsc_set_canvas_visible, (int visible), {
+  if (Module.canvas) Module.canvas.style.visibility = visible ? "" : "hidden";
+});
+EM_JS(int, _sapp_emsc_canvas_visible, (void), {
+  return Module.canvas && Module.canvas.style.visibility === "hidden" ? 0 : 1;
+});
+#endif
+
+/* window style and visibility */
+SOKOL_API_IMPL void sapp_set_window_resizable(bool resizable) {
+#if defined(_SAPP_MACOS)
+  _sapp_utils_resizable = resizable;
+  _sapp_macos_apply_style();
+#elif defined(_SAPP_WIN32)
+  _sapp_utils_resizable = resizable;
+  _sapp_win32_apply_style();
+#elif defined(_SAPP_LINUX)
+  _sapp_utils_resizable = resizable;
+  _sapp_x11_apply_size_hints();
+#else
+  (void)resizable;
+#endif
+}
+
+SOKOL_API_IMPL void sapp_set_window_decorated(bool decorated) {
+#if defined(_SAPP_MACOS)
+  _sapp_utils_decorated = decorated;
+  _sapp_macos_apply_style();
+#elif defined(_SAPP_WIN32)
+  _sapp_utils_decorated = decorated;
+  _sapp_win32_apply_style();
+#elif defined(_SAPP_LINUX)
+  _sapp_x11_set_window_decorated(decorated);
+#else
+  (void)decorated;
+#endif
+}
+
+SOKOL_API_IMPL bool sapp_can_move_window(void) {
+#if defined(_SAPP_MACOS) || defined(_SAPP_WIN32)
+  return true;
+#elif defined(_SAPP_LINUX)
+  return _sapp_x11_can_move_window();
+#else
+  return false;
+#endif
+}
+
+SOKOL_API_IMPL void sapp_set_window_visible(bool visible) {
+#if defined(_SAPP_MACOS)
+  _sapp_macos_set_window_visible(visible);
+#elif defined(_SAPP_WIN32)
+  _sapp_win32_set_window_visible(visible);
+#elif defined(_SAPP_LINUX)
+  if (visible) {
+    _sapp_x11_show_window();
+  } else {
+    _sapp_x11_hide_window();
+  }
+#elif defined(_SAPP_EMSCRIPTEN)
+  _sapp_emsc_set_canvas_visible(visible ? 1 : 0);
+#else
+  (void)visible;
+#endif
+}
+
+SOKOL_API_IMPL bool sapp_window_visible(void) {
+#if defined(_SAPP_MACOS)
+  return _sapp_macos_window_visible();
+#elif defined(_SAPP_WIN32)
+  return _sapp_win32_window_visible();
+#elif defined(_SAPP_LINUX)
+  return _sapp_x11_window_visible();
+#elif defined(_SAPP_EMSCRIPTEN)
+  return _sapp_emsc_canvas_visible() != 0;
+#else
+  return true;
+#endif
+}
 
 SOKOL_API_IMPL void sapp_set_window_position(int x, int y) {
 #if defined(_SAPP_MACOS)
@@ -907,12 +1170,30 @@ SOKOL_API_IMPL const char* sapp_display_name(int index) {
 #endif
 }
 
+SOKOL_API_IMPL void sapp_display_position(int index, int *x, int *y) {
+#if defined(_SAPP_MACOS)
+  _sapp_macos_display_position(index, x, y);
+#elif defined(_SAPP_WIN32)
+  _sapp_win32_display_position(index, x, y);
+#elif defined(_SAPP_LINUX)
+  _sapp_x11_display_position(index, x, y);
+#else
+  (void)index;
+  *x = 0;
+  *y = 0;
+#endif
+}
+
 SOKOL_API_IMPL void sapp_set_fullscreen(bool enable) {
   if (_sapp.fullscreen != enable) {
 #if defined(_SAPP_WIN32)
     _sapp_win32_set_fullscreen(enable, SWP_SHOWWINDOW);
 #elif defined(_SAPP_LINUX)
+    /* as sokol_app's _sapp_x11_toggle_fullscreen(): the flag sapp_is_fullscreen() reads,
+       the window manager asked, and the dimensions updated */
+    _sapp.fullscreen = enable;
     _sapp_x11_set_fullscreen(enable);
+    _sapp_x11_update_dimensions_from_window_size();
 #elif defined(_SAPP_MACOS)
     _sapp_macos_toggle_fullscreen();
 #elif defined(_SAPP_EMSCRIPTEN)
