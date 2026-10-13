@@ -612,17 +612,13 @@ _SOKOL_PRIVATE void _sapp_x11_set_mouse_position(float x, float y) {
   }
 }
 
-_SOKOL_PRIVATE bool _sapp_x11_window_focused(void) {
-  if (_sapp.x11.display) {
-    Window focused;
-    int revert_to;
-    XGetInputFocus(_sapp.x11.display, &focused, &revert_to);
-    return focused == _sapp.x11.window;
-  }
-  return false;
-}
+/* [libwgrender] _sapp_x11_window_focused() removed: sokol_app.h defines it now (it tracks
+   focus from FocusIn/FocusOut events). */
 
 _SOKOL_PRIVATE int _sapp_x11_display_width(int index) {
+  if (!_sapp.x11.display) {
+    return 0;
+  }
   int num_displays = 0;
   int width = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
@@ -639,6 +635,9 @@ _SOKOL_PRIVATE int _sapp_x11_display_width(int index) {
 }
 
 _SOKOL_PRIVATE int _sapp_x11_display_height(int index) {
+  if (!_sapp.x11.display) {
+    return 0;
+  }
   int num_displays = 0;
   int height = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
@@ -655,6 +654,9 @@ _SOKOL_PRIVATE int _sapp_x11_display_height(int index) {
 }
 
 _SOKOL_PRIVATE int _sapp_x11_num_displays(void) {
+  if (!_sapp.x11.display) {
+    return 1;
+  }
   int num_displays = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -665,6 +667,9 @@ _SOKOL_PRIVATE int _sapp_x11_num_displays(void) {
 }
 
 _SOKOL_PRIVATE int _sapp_x11_current_display(void) {
+  if (!_sapp.x11.display) {
+    return 0;
+  }
   int num_displays = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -694,6 +699,9 @@ _SOKOL_PRIVATE int _sapp_x11_current_display(void) {
 }
 
 _SOKOL_PRIVATE void _sapp_x11_set_display(int index) {
+  if (!_sapp.x11.display) {
+    return;
+  }
   int num_displays = 0;
   XRRMonitorInfo *displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -718,6 +726,9 @@ _SOKOL_PRIVATE void _sapp_x11_set_display(int index) {
 }
 
 _SOKOL_PRIVATE const char* _sapp_x11_display_name(int index) {
+  if (!_sapp.x11.display) {
+    return "";
+  }
   int num_displays = 0;
   XRRMonitorInfo* displays = XRRGetMonitors(
       _sapp.x11.display, DefaultRootWindow(_sapp.x11.display), True, &num_displays);
@@ -741,11 +752,9 @@ _SOKOL_PRIVATE const char* _sapp_x11_display_name(int index) {
 _SOKOL_PRIVATE void _sapp_linux_set_swap_interval(int interval) {
     _sapp.desc.swap_interval = interval;
     #if defined(_SAPP_GLX)
-    typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display* dpy, GLXDrawable drawable, int interval);
-    PFNGLXSWAPINTERVALEXTPROC glXSwapIntervalEXT = (PFNGLXSWAPINTERVALEXTPROC) glXGetProcAddress((const GLubyte*)"glXSwapIntervalEXT");
-    if (glXSwapIntervalEXT) {
-        glXSwapIntervalEXT(_sapp.x11.display, _sapp.x11.window, interval);
-    }
+    /* [libwgrender] use sokol_app's GLX loader: glXGetProcAddress isn't declared (sokol
+       loads libGL dynamically), and the drawable is the GLX window, not the X11 one */
+    _sapp_glx_swapinterval(interval);
     #elif defined(_SAPP_EGL)
     eglSwapInterval(_sapp.egl.display, interval);
     #endif
@@ -912,7 +921,11 @@ SOKOL_API_IMPL void sapp_set_fullscreen(bool enable) {
 #if defined(_SAPP_WIN32)
     _sapp_win32_set_fullscreen(enable, SWP_SHOWWINDOW);
 #elif defined(_SAPP_LINUX)
+    /* as sokol_app's _sapp_x11_toggle_fullscreen(): the flag sapp_is_fullscreen() reads,
+       the window manager asked, and the dimensions updated */
+    _sapp.fullscreen = enable;
     _sapp_x11_set_fullscreen(enable);
+    _sapp_x11_update_dimensions_from_window_size();
 #elif defined(_SAPP_MACOS)
     _sapp_macos_toggle_fullscreen();
 #elif defined(_SAPP_EMSCRIPTEN)
